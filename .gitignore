@@ -1,0 +1,12 @@
+# Environment Variables (contains secrets like API webhook URLs)
+.env
+
+# Local Lead Tracking State (prevents duplicates)
+processed_leads.txt
+
+# Python cache & temporary files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
