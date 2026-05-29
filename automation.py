@@ -18,6 +18,7 @@ import urllib.request
 import logging
 import argparse
 import hashlib
+from datetime import datetime, timezone
 
 # Configure Logger
 logging.basicConfig(
@@ -190,13 +191,49 @@ def check_for_new_leads(sheet_url, webhook_url, dry_run=False, send_all=False):
         logging.info("The spreadsheet is empty.")
         return
 
-    # Check if the state file exists to determine if this is the initial run
-    state_exists = os.path.exists(STATE_FILE)
+    # Filter out historical leads based on age, unless send_all is requested
+    if send_all:
+        logging.info("send_all is True. Skipping age filtering.")
+        recent_rows = rows
+    else:
+        max_age_minutes = int(os.environ.get("MAX_LEAD_AGE_MINUTES", 60))
+        logging.info(f"Filtering leads with age threshold: {max_age_minutes} minutes")
+
+        recent_rows = []
+        for row in rows:
+            created_time_str = row.get("created_time")
+            if not created_time_str:
+                # If there is no created_time, keep it to be safe
+                recent_rows.append(row)
+                continue
+            
+            try:
+                lead_time = datetime.fromisoformat(created_time_str.strip())
+                if lead_time.tzinfo is not None:
+                    now = datetime.now(timezone.utc)
+                    age_seconds = (now - lead_time.astimezone(timezone.utc)).total_seconds()
+                else:
+                    now = datetime.now()
+                    age_seconds = (now - lead_time).total_seconds()
+                
+                age_minutes = age_seconds / 60.0
+                if age_minutes <= max_age_minutes:
+                    recent_rows.append(row)
+            except Exception as e:
+                # If parsing fails, default to keeping it to be safe
+                logging.warning(f"Failed to parse created_time '{created_time_str}': {e}. Keeping row.")
+                recent_rows.append(row)
+
+    logging.info(f"Filtered {len(recent_rows)}/{total_rows} recent leads within {max_age_minutes if not send_all else 'all'} minutes.")
+
+    if len(recent_rows) == 0:
+        logging.info("No recent leads within the time window.")
+        return
+
     processed_ids = load_processed_ids()
-    
     new_leads = []
     
-    for row in rows:
+    for row in recent_rows:
         row_id = get_row_id(row)
         if row_id not in processed_ids:
             new_leads.append((row_id, row))
@@ -205,24 +242,7 @@ def check_for_new_leads(sheet_url, webhook_url, dry_run=False, send_all=False):
         logging.info("No new leads found.")
         return
 
-    logging.info(f"Found {len(new_leads)} leads not in the local state.")
-
-    # Guard against spamming existing rows on the first run
-    if not state_exists and not send_all:
-        logging.warning("=== First-Time Run Notice ===")
-        logging.warning("No state file 'processed_leads.txt' was found.")
-        logging.warning("To prevent spamming your Zoho Cliq channel, all existing rows will be marked as processed.")
-        logging.warning("If you want to send all existing leads to Cliq, run this script with the --send-all flag.")
-        logging.warning("=============================")
-        
-        # Populate the state file with all current lead IDs without sending
-        if not dry_run:
-            for row_id, _ in new_leads:
-                save_processed_id(row_id)
-            logging.info(f"Successfully marked {len(new_leads)} existing leads as processed.")
-        else:
-            logging.info(f"[DRY-RUN] Would mark {len(new_leads)} existing leads as processed.")
-        return
+    logging.info(f"Found {len(new_leads)} recent leads not in the local state.")
 
     # Send notifications starting from the oldest (top of sheet) to the newest (bottom of sheet)
     success_count = 0
